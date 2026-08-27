@@ -1,11 +1,10 @@
 'use strict'
 
 const { tspl } = require('@matteo.collina/tspl')
-const { test, after } = require('node:test')
+const { resolve: pathResolve } = require('node:path')
+const { test, after, beforeEach } = require('node:test')
 const { createReadStream, writeFileSync, unlinkSync } = require('node:fs')
 const { Client, errors } = require('..')
-const { kConnect } = require('../lib/core/symbols')
-const timers = require('../lib/util/timers')
 const { createServer } = require('node:http')
 const EventEmitter = require('node:events')
 const FakeTimers = require('@sinonjs/fake-timers')
@@ -16,14 +15,28 @@ const {
   Writable,
   PassThrough
 } = require('node:stream')
+const {
+  tick: fastTimersTick,
+  reset: resetFastTimers
+} = require('../lib/util/timers')
+
+beforeEach(() => {
+  resetFastTimers()
+})
+
+function tickOnConnect (client, tick) {
+  client.once('connect', () => {
+    process.nextTick(tick)
+  })
+}
 
 test('request timeout', async (t) => {
   t = tspl(t, { plan: 1 })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
-    }, 1000)
+    }, 2000)
   })
   after(() => server.close())
 
@@ -42,11 +55,11 @@ test('request timeout', async (t) => {
 test('request timeout with readable body', async (t) => {
   t = tspl(t, { plan: 1 })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
   })
   after(() => server.close())
 
-  const tempfile = `${__filename}.10mb.txt`
+  const tempfile = pathResolve(__dirname, 'request-timeout.10mb.bin')
   writeFileSync(tempfile, Buffer.alloc(10 * 1024 * 1024))
   after(() => unlinkSync(tempfile))
 
@@ -72,13 +85,7 @@ test('body timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     res.write('hello')
   })
   after(() => server.close())
@@ -87,16 +94,20 @@ test('body timeout', async (t) => {
     const client = new Client(`http://localhost:${server.address().port}`, { bodyTimeout: 50 })
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      clock.tick(50)
+      fastTimersTick(50)
+    })
+
     client.request({ path: '/', method: 'GET' }, (err, { body }) => {
       t.ifError(err)
       body.on('data', () => {
         clock.tick(100)
+        fastTimersTick(100)
       }).on('error', (err) => {
         t.ok(err instanceof errors.BodyTimeoutError)
       })
     })
-
-    clock.tick(50)
   })
 
   await t.completed
@@ -111,17 +122,12 @@ test('overridden request timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     clock.tick(100)
+    fastTimersTick(100)
   })
   after(() => server.close())
 
@@ -129,11 +135,14 @@ test('overridden request timeout', async (t) => {
     const client = new Client(`http://localhost:${server.address().port}`, { headersTimeout: 500 })
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      clock.tick(50)
+      fastTimersTick(50)
+    })
+
     client.request({ path: '/', method: 'GET', headersTimeout: 50 }, (err, response) => {
       t.ok(err instanceof errors.HeadersTimeoutError)
     })
-
-    clock.tick(50)
   })
 
   await t.completed
@@ -148,13 +157,7 @@ test('overridden body timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     res.write('hello')
   })
   after(() => server.close())
@@ -163,16 +166,20 @@ test('overridden body timeout', async (t) => {
     const client = new Client(`http://localhost:${server.address().port}`, { bodyTimeout: 500 })
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      fastTimersTick()
+      fastTimersTick()
+    })
+
     client.request({ path: '/', method: 'GET', bodyTimeout: 50 }, (err, { body }) => {
       t.ifError(err)
       body.on('data', () => {
-        clock.tick(100)
+        fastTimersTick()
+        fastTimersTick()
       }).on('error', (err) => {
         t.ok(err instanceof errors.BodyTimeoutError)
       })
     })
-
-    clock.tick(50)
   })
 
   await t.completed
@@ -187,17 +194,12 @@ test('With EE signal', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     clock.tick(100)
+    fastTimersTick(100)
   })
   after(() => server.close())
 
@@ -208,11 +210,14 @@ test('With EE signal', async (t) => {
     const ee = new EventEmitter()
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      clock.tick(50)
+      fastTimersTick(50)
+    })
+
     client.request({ path: '/', method: 'GET', signal: ee }, (err, response) => {
       t.ok(err instanceof errors.HeadersTimeoutError)
     })
-
-    clock.tick(50)
   })
 
   await t.completed
@@ -227,17 +232,12 @@ test('With abort-controller signal', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     clock.tick(100)
+    fastTimersTick(100)
   })
   after(() => server.close())
 
@@ -248,11 +248,14 @@ test('With abort-controller signal', async (t) => {
     const abortController = new AbortController()
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      clock.tick(50)
+      fastTimersTick(50)
+    })
+
     client.request({ path: '/', method: 'GET', signal: abortController.signal }, (err, response) => {
       t.ok(err instanceof errors.HeadersTimeoutError)
     })
-
-    clock.tick(50)
   })
 
   await t.completed
@@ -267,19 +270,14 @@ test('Abort before timeout (EE)', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
   const ee = new EventEmitter()
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     ee.emit('abort')
     clock.tick(50)
+    fastTimersTick(50)
   })
   after(() => server.close())
 
@@ -292,6 +290,7 @@ test('Abort before timeout (EE)', async (t) => {
     client.request({ path: '/', method: 'GET', signal: ee }, (err, response) => {
       t.ok(err instanceof errors.RequestAbortedError)
       clock.tick(100)
+      fastTimersTick(100)
     })
   })
 
@@ -307,19 +306,14 @@ test('Abort before timeout (abort-controller)', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
   const abortController = new AbortController()
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     abortController.abort()
     clock.tick(50)
+    fastTimersTick(50)
   })
   after(() => server.close())
 
@@ -332,6 +326,7 @@ test('Abort before timeout (abort-controller)', async (t) => {
     client.request({ path: '/', method: 'GET', signal: abortController.signal }, (err, response) => {
       t.ok(err instanceof errors.RequestAbortedError)
       clock.tick(100)
+      fastTimersTick(100)
     })
   })
 
@@ -347,17 +342,12 @@ test('Timeout with pipelining', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     clock.tick(50)
+    fastTimersTick(50)
   })
   after(() => server.close())
 
@@ -393,17 +383,12 @@ test('Global option', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     clock.tick(100)
+    fastTimersTick(100)
   })
   after(() => server.close())
 
@@ -413,11 +398,14 @@ test('Global option', async (t) => {
     })
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      clock.tick(50)
+      fastTimersTick(50)
+    })
+
     client.request({ path: '/', method: 'GET' }, (err, response) => {
       t.ok(err instanceof errors.HeadersTimeoutError)
     })
-
-    clock.tick(50)
   })
 
   await t.completed
@@ -432,17 +420,12 @@ test('Request options overrides global option', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 100)
     clock.tick(100)
+    fastTimersTick(100)
   })
   after(() => server.close())
 
@@ -452,11 +435,14 @@ test('Request options overrides global option', async (t) => {
     })
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      clock.tick(50)
+      fastTimersTick(50)
+    })
+
     client.request({ path: '/', method: 'GET' }, (err, response) => {
       t.ok(err instanceof errors.HeadersTimeoutError)
     })
-
-    clock.tick(50)
   })
 
   await t.completed
@@ -465,7 +451,7 @@ test('Request options overrides global option', async (t) => {
 test('client.destroy should cancel the timeout', async (t) => {
   t = tspl(t, { plan: 2 })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     res.end('hello')
   })
   after(() => server.close())
@@ -496,13 +482,7 @@ test('client.close should wait for the timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
   })
   after(() => server.close())
 
@@ -512,18 +492,17 @@ test('client.close should wait for the timeout', async (t) => {
     })
     after(() => client.destroy())
 
+    tickOnConnect(client, () => {
+      clock.tick(100)
+      fastTimersTick(100)
+    })
+
     client.request({ path: '/', method: 'GET' }, (err, response) => {
       t.ok(err instanceof errors.HeadersTimeoutError)
     })
 
     client.close((err) => {
       t.ifError(err)
-    })
-
-    client.on('connect', () => {
-      process.nextTick(() => {
-        clock.tick(100)
-      })
     })
   })
 
@@ -581,17 +560,12 @@ test('Disable request timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 32e3)
     clock.tick(33e3)
+    fastTimersTick(33e3)
   })
   after(() => server.close())
 
@@ -614,6 +588,7 @@ test('Disable request timeout', async (t) => {
     })
 
     clock.tick(31e3)
+    fastTimersTick(31e3)
   })
 
   await t.completed
@@ -628,17 +603,12 @@ test('Disable request timeout for a single request', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 32e3)
     clock.tick(33e3)
+    fastTimersTick(33e3)
   })
   after(() => server.close())
 
@@ -661,6 +631,7 @@ test('Disable request timeout for a single request', async (t) => {
     })
 
     clock.tick(31e3)
+    fastTimersTick(31e3)
   })
 
   await t.completed
@@ -675,17 +646,12 @@ test('stream timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 301e3)
     clock.tick(301e3)
+    fastTimersTick(301e3)
   })
   after(() => server.close())
 
@@ -716,17 +682,12 @@ test('stream custom timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       res.end('hello')
     }, 31e3)
     clock.tick(31e3)
+    fastTimersTick(31e3)
   })
   after(() => server.close())
 
@@ -759,17 +720,12 @@ test('pipeline timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       req.pipe(res)
     }, 301e3)
     clock.tick(301e3)
+    fastTimersTick(301e3)
   })
   after(() => server.close())
 
@@ -819,17 +775,12 @@ test('pipeline timeout', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     setTimeout(() => {
       req.pipe(res)
     }, 31e3)
     clock.tick(31e3)
+    fastTimersTick(31e3)
   })
   after(() => server.close())
 
@@ -881,13 +832,7 @@ test('client.close should not deadlock', async (t) => {
   })
   after(() => clock.uninstall())
 
-  const orgTimers = { ...timers }
-  Object.assign(timers, { setTimeout, clearTimeout })
-  after(() => {
-    Object.assign(timers, orgTimers)
-  })
-
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
   })
   after(() => server.close())
 
@@ -898,19 +843,20 @@ test('client.close should not deadlock', async (t) => {
     })
     after(() => client.destroy())
 
-    client[kConnect](() => {
-      client.request({
-        path: '/',
-        method: 'GET'
-      }, (err, response) => {
-        t.ok(err instanceof errors.HeadersTimeoutError)
-      })
-
-      client.close((err) => {
-        t.ifError(err)
-      })
-
+    tickOnConnect(client, () => {
       clock.tick(100)
+      fastTimersTick(100)
+    })
+
+    client.request({
+      path: '/',
+      method: 'GET'
+    }, (err, response) => {
+      t.ok(err instanceof errors.HeadersTimeoutError)
+    })
+
+    client.close((err) => {
+      t.ifError(err)
     })
   })
   await t.completed

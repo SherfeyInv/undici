@@ -21,7 +21,7 @@ test('multiple reconnect', async (t) => {
     Object.assign(timers, orgTimers)
   })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     n === 0 ? res.destroy() : res.end('ok')
   })
   after(() => server.close())
@@ -48,6 +48,8 @@ test('multiple reconnect', async (t) => {
   client.on('disconnect', () => {
     if (++n === 1) {
       t.ok(true, 'pass')
+    } else if (!client.closed && !client.destroyed) {
+      t.fail('unexpected disconnect')
     }
     process.nextTick(() => {
       clock.tick(1000)

@@ -4,6 +4,8 @@ const { tspl } = require('@matteo.collina/tspl')
 const { test, describe, after, beforeEach } = require('node:test')
 const { EnvHttpProxyAgent, ProxyAgent, Agent, fetch, MockAgent } = require('..')
 const { kNoProxyAgent, kHttpProxyAgent, kHttpsProxyAgent, kClosed, kDestroyed, kProxy } = require('../lib/core/symbols')
+const { createServer } = require('node:http')
+const { createProxy } = require('proxy')
 
 const env = { ...process.env }
 
@@ -158,6 +160,54 @@ test('destroys all agents', async (t) => {
   t.ok(dispatcher[kHttpsProxyAgent][kDestroyed])
 })
 
+test('defaults to non-tunneled HTTP proxying for HTTP endpoints - #5093', async (t) => {
+  t = tspl(t, { plan: 3 })
+
+  const server = await buildServer()
+  const proxy = await buildProxy()
+
+  process.env.http_proxy = `http://localhost:${proxy.address().port}`
+
+  const dispatcher = new EnvHttpProxyAgent()
+  const serverUrl = `http://localhost:${server.address().port}`
+
+  try {
+    proxy.on('connect', () => {
+      t.fail('should not tunnel plain HTTP over an HTTP proxy by default')
+    })
+
+    proxy.on('request', (req) => {
+      t.strictEqual(req.url, `${serverUrl}/`)
+    })
+
+    server.on('request', (req, res) => {
+      t.strictEqual(req.url, '/')
+      res.end('ok')
+    })
+
+    const response = await fetch(serverUrl, { dispatcher })
+    t.strictEqual(await response.text(), 'ok')
+  } finally {
+    await new Promise((resolve) => proxy.close(resolve))
+    await new Promise((resolve) => server.close(resolve))
+    await dispatcher.close()
+  }
+})
+
+function buildServer () {
+  return new Promise((resolve) => {
+    const server = createServer({ joinDuplicateHeaders: true })
+    server.listen(0, () => resolve(server))
+  })
+}
+
+function buildProxy () {
+  return new Promise((resolve) => {
+    const server = createProxy(createServer({ joinDuplicateHeaders: true }))
+    server.listen(0, () => resolve(server))
+  })
+}
+
 const createEnvHttpProxyAgentWithMocks = (plan = 1, opts = {}) => {
   const factory = (origin) => {
     const mockAgent = new MockAgent()
@@ -171,7 +221,7 @@ const createEnvHttpProxyAgentWithMocks = (plan = 1, opts = {}) => {
   }
   process.env.http_proxy = 'http://localhost:8080'
   process.env.https_proxy = 'http://localhost:8443'
-  const dispatcher = new EnvHttpProxyAgent({ ...opts, factory })
+  const dispatcher = new EnvHttpProxyAgent({ proxyTunnel: true, ...opts, factory })
   const agentSymbols = [kNoProxyAgent, kHttpProxyAgent, kHttpsProxyAgent]
   agentSymbols.forEach((agentSymbol) => {
     const originalDispatch = dispatcher[agentSymbol].dispatch
@@ -258,10 +308,10 @@ describe('no_proxy', () => {
     t.ok(await doesNotProxy('http://example:80'))
     t.ok(await doesNotProxy('http://example:0'))
     t.ok(await doesNotProxy('http://example:1337'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example'))
+    t.ok(await doesNotProxy('http://sub.example'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.no'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://a.b.example'))
+    t.ok(await doesNotProxy('http://a.b.example'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://host/example'))
     return dispatcher.close()
   })
@@ -273,10 +323,10 @@ describe('no_proxy', () => {
     t.ok(await doesNotProxy('http://example:80'))
     t.ok(await doesNotProxy('http://example:0'))
     t.ok(await doesNotProxy('http://example:1337'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example'))
+    t.ok(await doesNotProxy('http://sub.example'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.no'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://a.b.example'))
+    t.ok(await doesNotProxy('http://a.b.example'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://host/example'))
     return dispatcher.close()
   })
@@ -290,24 +340,25 @@ describe('no_proxy', () => {
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example:0'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example:1337'))
     t.ok(await doesNotProxy('http://sub.example'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://no.sub.example'))
+    t.ok(await doesNotProxy('http://no.sub.example'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub-example'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.sub'))
     return dispatcher.close()
   })
 
   test('host + port', async (t) => {
-    t = tspl(t, { plan: 12 })
+    t = tspl(t, { plan: 13 })
     process.env.no_proxy = 'example:80, localhost:3000'
-    const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(12)
+    const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(13)
     t.ok(await doesNotProxy('http://example'))
     t.ok(await doesNotProxy('http://example:80'))
+    t.ok(await doesNotProxy('http://sub.example:80'))
     t.ok(await doesNotProxy('http://example:0'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example:1337'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example'))
+    t.ok(await doesNotProxy('http://sub.example'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.no'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://a.b.example'))
+    t.ok(await doesNotProxy('http://a.b.example'))
     t.ok(await doesNotProxy('http://localhost:3000/'))
     t.ok(await doesNotProxy('https://localhost:3000/'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://localhost:3001/'))
@@ -315,52 +366,48 @@ describe('no_proxy', () => {
     return dispatcher.close()
   })
 
-  test('host suffix', async (t) => {
+  test('host suffix - leading dot stripped', async (t) => {
     t = tspl(t, { plan: 9 })
     process.env.no_proxy = '.example'
     const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(9)
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example:80'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example:1337'))
-    t.ok(await doesNotProxy('http://sub.example'))
-    t.ok(await doesNotProxy('http://sub.example:80'))
-    t.ok(await doesNotProxy('http://sub.example:1337'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.no'))
-    t.ok(await doesNotProxy('http://a.b.example'))
-    return dispatcher.close()
-  })
-
-  test('host suffix with *.', async (t) => {
-    t = tspl(t, { plan: 9 })
-    process.env.no_proxy = '*.example'
-    const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(9)
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example:80'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example:1337'))
-    t.ok(await doesNotProxy('http://sub.example'))
-    t.ok(await doesNotProxy('http://sub.example:80'))
-    t.ok(await doesNotProxy('http://sub.example:1337'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.no'))
-    t.ok(await doesNotProxy('http://a.b.example'))
-    return dispatcher.close()
-  })
-
-  test('substring suffix', async (t) => {
-    t = tspl(t, { plan: 10 })
-    process.env.no_proxy = '*example'
-    const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(10)
     t.ok(await doesNotProxy('http://example'))
     t.ok(await doesNotProxy('http://example:80'))
     t.ok(await doesNotProxy('http://example:1337'))
     t.ok(await doesNotProxy('http://sub.example'))
     t.ok(await doesNotProxy('http://sub.example:80'))
     t.ok(await doesNotProxy('http://sub.example:1337'))
-    t.ok(await doesNotProxy('http://prefexample'))
-    t.ok(await doesNotProxy('http://a.b.example'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.no'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://host/example'))
+    t.ok(await doesNotProxy('http://a.b.example'))
+    return dispatcher.close()
+  })
+
+  test('host suffix with *. - leading dot with asterisk stripped', async (t) => {
+    t = tspl(t, { plan: 9 })
+    process.env.no_proxy = '*.example'
+    const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(9)
+    t.ok(await doesNotProxy('http://example'))
+    t.ok(await doesNotProxy('http://example:80'))
+    t.ok(await doesNotProxy('http://example:1337'))
+    t.ok(await doesNotProxy('http://sub.example'))
+    t.ok(await doesNotProxy('http://sub.example:80'))
+    t.ok(await doesNotProxy('http://sub.example:1337'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.no'))
+    t.ok(await doesNotProxy('http://a.b.example'))
+    return dispatcher.close()
+  })
+
+  test('substring suffix are NOT supported', async (t) => {
+    t = tspl(t, { plan: 6 })
+    process.env.no_proxy = '*example'
+    const { dispatcher, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(6)
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://prefexample'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://x.prefexample'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://a.b.example'))
     return dispatcher.close()
   })
 
@@ -393,6 +440,27 @@ describe('no_proxy', () => {
     t.ok(await doesNotProxy('http://10.0.0.2/'))
     t.ok(await doesNotProxy('http://10.0.0.2:80/'))
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://10.0.0.2:1337/'))
+    return dispatcher.close()
+  })
+
+  test('bare IPv6 addresses in no_proxy are matched (issue #5616)', async (t) => {
+    // A bare IPv6 address like ::1 is valid in no_proxy (curl and most tools
+    // accept it), but the old regex confused the last colon as a port separator.
+    t = tspl(t, { plan: 8 })
+    process.env.no_proxy = '::1,[::2]:80,::3'
+    const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(8)
+    // ::1 without brackets – must be matched
+    t.ok(await doesNotProxy('http://[::1]/'))
+    t.ok(await doesNotProxy('http://[::1]:80/'))
+    t.ok(await doesNotProxy('http://[::1]:1337/'))
+    // [::2]:80 – only port 80 bypasses proxy
+    t.ok(await doesNotProxy('http://[::2]:80/'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://[::2]:1337/'))
+    // ::3 without brackets – must be matched
+    t.ok(await doesNotProxy('http://[::3]/'))
+    t.ok(await doesNotProxy('http://[::3]:443/'))
+    // unrelated address must still proxy
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://[::4]/'))
     return dispatcher.close()
   })
 
@@ -442,11 +510,11 @@ describe('no_proxy', () => {
 
   test('prefers lowercase over uppercase', async (t) => {
     t = tspl(t, { plan: 2 })
-    process.env.NO_PROXY = 'sub.example.com'
+    process.env.NO_PROXY = 'another.com'
     process.env.no_proxy = 'example.com'
     const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(6)
     t.ok(await doesNotProxy('http://example.com'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example.com'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://another.com'))
     return dispatcher.close()
   })
 
@@ -464,10 +532,10 @@ describe('no_proxy', () => {
     process.env.no_proxy = 'example.com'
     const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(4)
     t.ok(await doesNotProxy('http://example.com'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example.com'))
-    process.env.no_proxy = 'sub.example.com'
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://another.com'))
+    process.env.no_proxy = 'another.com'
     t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://example.com'))
-    t.ok(await doesNotProxy('http://sub.example.com'))
+    t.ok(await doesNotProxy('http://another.com'))
     return dispatcher.close()
   })
 
@@ -475,10 +543,10 @@ describe('no_proxy', () => {
     t = tspl(t, { plan: 4 })
     const { dispatcher, doesNotProxy, usesProxyAgent } = createEnvHttpProxyAgentWithMocks(4, { noProxy: 'example.com' })
     t.ok(await doesNotProxy('http://example.com'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example.com'))
-    process.env.no_proxy = 'sub.example.com'
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://another.com'))
+    process.env.no_proxy = 'another.com'
     t.ok(await doesNotProxy('http://example.com'))
-    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://sub.example.com'))
+    t.ok(await usesProxyAgent(kHttpProxyAgent, 'http://another.com'))
     return dispatcher.close()
   })
 })

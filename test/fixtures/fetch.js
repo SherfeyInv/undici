@@ -1,7 +1,9 @@
+'use strict'
+
 const { createServer } = require('node:http')
 const { fetch } = require('../..')
 
-const server = createServer((_req, res) => {
+const server = createServer({ joinDuplicateHeaders: true }, (_req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' })
   res.end('hello world')
 })

@@ -3,15 +3,72 @@
 const { tspl } = require('@matteo.collina/tspl')
 const { test, after } = require('node:test')
 const { Client, errors } = require('..')
+const EventEmitter = require('node:events')
 const { createServer } = require('node:http')
 const { Readable } = require('node:stream')
 const FakeTimers = require('@sinonjs/fake-timers')
 const timers = require('../lib/util/timers')
+const connectH1 = require('../lib/dispatcher/client-h1')
+const {
+  kMaxHeadersSize,
+  kMaxResponseSize,
+  kParser,
+  kQueue,
+  kRunningIdx
+} = require('../lib/core/symbols')
+
+class DummySocket extends EventEmitter {
+  constructor () {
+    super()
+    this.destroyed = false
+    this.errored = null
+  }
+
+  read () {
+    return null
+  }
+}
+
+test('parser reuses WeakRef when replacing timeout callbacks', async (t) => {
+  const OriginalWeakRef = global.WeakRef
+  t.after(() => {
+    global.WeakRef = OriginalWeakRef
+  })
+
+  t = tspl(t, { plan: 1 })
+
+  let weakRefCount = 0
+
+  global.WeakRef = class CountingWeakRef extends OriginalWeakRef {
+    constructor (target) {
+      weakRefCount++
+      super(target)
+    }
+  }
+
+  const socket = new DummySocket()
+  const client = {
+    [kMaxHeadersSize]: 1024,
+    [kMaxResponseSize]: 1024,
+    [kQueue]: [],
+    [kRunningIdx]: 0
+  }
+
+  await connectH1(client, socket)
+  const parser = socket[kParser]
+
+  parser.setTimeout(200, 0)
+  parser.setTimeout(300, 0)
+  parser.setTimeout(400, 1)
+  parser.destroy()
+
+  t.strictEqual(weakRefCount, 1)
+})
 
 test('refresh timeout on pause', async (t) => {
   t = tspl(t, { plan: 1 })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     res.flushHeaders()
   })
   after(() => server.close())
@@ -26,21 +83,21 @@ test('refresh timeout on pause', async (t) => {
       path: '/',
       method: 'GET'
     }, {
-      onConnect () {
+      onRequestStart () {
       },
-      onHeaders (statusCode, headers, resume) {
+      onResponseStart (controller) {
         setTimeout(() => {
-          resume()
+          controller.resume()
         }, 1000)
-        return false
+        controller.pause()
       },
-      onData () {
+      onResponseData () {
 
       },
-      onComplete () {
+      onResponseEnd () {
 
       },
-      onError (err) {
+      onResponseError (_controller, err) {
         t.ok(err instanceof errors.BodyTimeoutError)
       }
     })
@@ -61,7 +118,7 @@ test('start headers timeout after request body', async (t) => {
     Object.assign(timers, orgTimers)
   })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
   })
   after(() => server.close())
 
@@ -78,7 +135,7 @@ test('start headers timeout after request body', async (t) => {
       body,
       method: 'GET'
     }, {
-      onConnect () {
+      onRequestStart () {
         process.nextTick(() => {
           clock.tick(200)
         })
@@ -89,15 +146,15 @@ test('start headers timeout after request body', async (t) => {
           })
         })
       },
-      onHeaders (statusCode, headers, resume) {
+      onResponseStart () {
       },
-      onData () {
+      onResponseData () {
 
       },
-      onComplete () {
+      onResponseEnd () {
 
       },
-      onError (err) {
+      onResponseError (_controller, err) {
         t.equal(body.readableEnded, true)
         t.ok(err instanceof errors.HeadersTimeoutError)
       }
@@ -119,7 +176,7 @@ test('start headers timeout after async iterator request body', async (t) => {
     Object.assign(timers, orgTimers)
   })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
   })
   after(() => server.close())
 
@@ -141,7 +198,7 @@ test('start headers timeout after async iterator request body', async (t) => {
       body,
       method: 'GET'
     }, {
-      onConnect () {
+      onRequestStart () {
         process.nextTick(() => {
           clock.tick(200)
         })
@@ -149,15 +206,15 @@ test('start headers timeout after async iterator request body', async (t) => {
           res()
         })
       },
-      onHeaders (statusCode, headers, resume) {
+      onResponseStart () {
       },
-      onData () {
+      onResponseData () {
 
       },
-      onComplete () {
+      onResponseEnd () {
 
       },
-      onError (err) {
+      onResponseError (_controller, err) {
         t.ok(err instanceof errors.HeadersTimeoutError)
       }
     })
@@ -169,7 +226,7 @@ test('start headers timeout after async iterator request body', async (t) => {
 test('parser resume with no body timeout', async (t) => {
   t = tspl(t, { plan: 1 })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     res.end('asd')
   })
   after(() => server.close())
@@ -180,23 +237,29 @@ test('parser resume with no body timeout', async (t) => {
     })
     after(() => client.destroy())
 
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
+
     client.dispatch({
       path: '/',
       method: 'GET'
     }, {
-      onConnect () {
+      onRequestStart () {
       },
-      onHeaders (statusCode, headers, resume) {
-        setTimeout(resume, 2000)
-        return false
+      onResponseStart (controller) {
+        setTimeout(() => controller.resume(), 2000)
+        controller.pause()
       },
-      onData () {
+      onResponseData () {
 
       },
-      onComplete () {
+      onResponseEnd () {
         t.ok(true, 'pass')
       },
-      onError (err) {
+      onResponseError (_controller, err) {
         t.ifError(err)
       }
     })

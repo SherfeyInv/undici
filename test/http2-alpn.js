@@ -44,11 +44,9 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for GET', async (t) => 
     }
   )
 
-  server.listen(0)
-  await once(server, 'listening')
-
   // close the server on teardown
   after(() => server.close())
+  await once(server.listen(0), 'listening')
 
   // set the port
   const port = server.address().port
@@ -64,6 +62,12 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for GET', async (t) => 
 
   // close the client on teardown
   after(() => client.close())
+
+  client.on('disconnect', () => {
+    if (!client.closed && !client.destroyed) {
+      t.fail('unexpected disconnect')
+    }
+  })
 
   // make an undici request using where it wants http/2
   const response = await client.request({
@@ -93,6 +97,7 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for GET', async (t) => 
   const httpsOptions = {
     ca,
     servername: 'agent1',
+    ALPNProtocols: ['http/1.1'],
     headers: {
       'x-custom-request-header': 'want 1.1'
     }
@@ -119,9 +124,11 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for GET', async (t) => 
   t.equal(httpsResponse.headers['x-custom-request-header'], 'want 1.1')
   t.equal(httpsResponse.headers['x-custom-response-header'], 'using 1.1')
   t.equal(Buffer.concat(httpsBody).toString('utf8'), JSON.stringify({
-    alpnProtocol: false,
+    alpnProtocol: 'http/1.1',
     httpVersion: '1.1'
   }))
+
+  await t.completed
 })
 
 test('Should upgrade to HTTP/2 when HTTPS/1 is available for POST', async (t) => {
@@ -191,11 +198,9 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for POST', async (t) =>
     stream.end('hello h2!')
   })
 
-  server.listen(0)
-  await once(server, 'listening')
-
   // close the server on teardown
   after(() => server.close())
+  await once(server.listen(0), 'listening')
 
   // set the port
   const port = server.address().port
@@ -211,6 +216,12 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for POST', async (t) =>
 
   // close the client on teardown
   after(() => client.close())
+
+  client.on('disconnect', () => {
+    if (!client.closed && !client.destroyed) {
+      t.fail('unexpected disconnect')
+    }
+  })
 
   // make an undici request using where it wants http/2
   const response = await client.request({
@@ -239,6 +250,7 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for POST', async (t) =>
   const httpsOptions = {
     ca,
     servername: 'agent1',
+    ALPNProtocols: ['http/1.1'],
     method: 'POST',
     headers: {
       'content-type': 'text/plain; charset=utf-8',
@@ -264,7 +276,7 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for POST', async (t) =>
       reject(err)
     })
 
-    httpsRequest.write(Buffer.from(body))
+    httpsRequest.end(Buffer.from(body))
 
     after(() => httpsRequest.destroy())
   })
@@ -272,7 +284,9 @@ test('Should upgrade to HTTP/2 when HTTPS/1 is available for POST', async (t) =>
   t.equal(httpsResponse.statusCode, 201)
   t.equal(httpsResponse.headers['content-type'], 'text/plain; charset=utf-8')
   t.equal(httpsResponse.headers['x-custom-request-header'], 'want 1.1')
-  t.equal(httpsResponse.headers['x-custom-alpn-protocol'], 'false')
+  t.equal(httpsResponse.headers['x-custom-alpn-protocol'], 'http/1.1')
   t.equal(Buffer.concat(httpsResponseBody).toString('utf-8'), 'hello http/1!')
   t.equal(Buffer.concat(httpsRequestChunks).toString('utf-8'), expectedBody)
+
+  await t.completed
 })
