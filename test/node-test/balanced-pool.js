@@ -3,9 +3,12 @@
 const { describe, test } = require('node:test')
 const assert = require('node:assert/strict')
 const { BalancedPool, Pool, Client, errors } = require('../..')
+const { EventEmitter } = require('node:events')
 const { createServer } = require('node:http')
 const { promisify } = require('node:util')
 const { tspl } = require('@matteo.collina/tspl')
+const { kUrl } = require('../../lib/core/symbols')
+const { kGetDispatcher } = require('../../lib/dispatcher/pool-base')
 
 test('throws when factory is not a function', (t) => {
   const p = tspl(t, { plan: 2 })
@@ -48,11 +51,61 @@ test('add/remove upstreams', (t) => {
   p.deepStrictEqual(pool.upstreams, [])
 })
 
+test('does not select dispatcher twice when selected dispatcher backpressures', (t) => {
+  class FakeDispatcher extends EventEmitter {
+    constructor (origin) {
+      super()
+      this[kUrl] = new URL(origin)
+    }
+
+    dispatch () {
+      return false
+    }
+
+    close () {
+      this.closed = true
+      return Promise.resolve()
+    }
+
+    destroy () {
+      this.destroyed = true
+      return Promise.resolve()
+    }
+  }
+
+  class CountingBalancedPool extends BalancedPool {
+    constructor (...args) {
+      super(...args)
+      this.calls = 0
+    }
+
+    [kGetDispatcher] () {
+      this.calls++
+      return super[kGetDispatcher]()
+    }
+  }
+
+  const pool = new CountingBalancedPool([
+    'http://localhost:1',
+    'http://localhost:2'
+  ], {
+    factory: (origin) => new FakeDispatcher(origin)
+  })
+  t.after(() => pool.close())
+
+  const ret = pool.dispatch({}, {
+    onResponseError () {}
+  })
+
+  assert.strictEqual(ret, true)
+  assert.strictEqual(pool.calls, 1)
+})
+
 test('basic get', async (t) => {
   const p = tspl(t, { plan: 16 })
 
   let server1Called = 0
-  const server1 = createServer((req, res) => {
+  const server1 = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     server1Called++
     p.strictEqual('/', req.url)
     p.strictEqual('GET', req.method)
@@ -64,7 +117,7 @@ test('basic get', async (t) => {
   await promisify(server1.listen).call(server1, 0)
 
   let server2Called = 0
-  const server2 = createServer((req, res) => {
+  const server2 = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     server2Called++
     p.strictEqual('/', req.url)
     p.strictEqual('GET', req.method)
@@ -109,7 +162,7 @@ test('connect/disconnect event(s)', async (t) => {
 
   const p = tspl(t, { plan: clients * 5 })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     res.writeHead(200, {
       Connection: 'keep-alive',
       'Keep-Alive': 'timeout=1s'
@@ -151,7 +204,7 @@ test('connect/disconnect event(s)', async (t) => {
 test('busy', async (t) => {
   const p = tspl(t, { plan: 8 * 6 + 2 + 1 })
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     p.strictEqual('/', req.url)
     p.strictEqual('GET', req.method)
     res.setHeader('content-type', 'text/plain')
@@ -205,7 +258,7 @@ test('factory option with basic get request', async (t) => {
   const client = new BalancedPool([], opts)
 
   let serverCalled = 0
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     serverCalled++
     p.strictEqual('/', req.url)
     p.strictEqual('GET', req.method)
@@ -250,6 +303,96 @@ test('throws when upstream is missing', async (t) => {
     p.ok(e instanceof errors.BalancedPoolMissingUpstreamError)
     p.strictEqual(e.message, 'No upstream has been added to the BalancedPool')
   }
+})
+
+test('getUpstream returns the correct Pool for given upstream', (t) => {
+  const p = tspl(t, { plan: 4 })
+
+  const upstream1 = 'http://localhost:3001'
+  const upstream2 = 'http://localhost:3002'
+
+  const pool = new BalancedPool()
+  pool.addUpstream(upstream1)
+  pool.addUpstream(upstream2)
+
+  const pool1 = pool.getUpstream(upstream1)
+  const pool2 = pool.getUpstream(upstream2)
+
+  p.ok(pool1 instanceof Pool)
+  p.ok(pool2 instanceof Pool)
+  const { kUrl } = require('../../lib/core/symbols')
+  p.strictEqual(pool1[kUrl].origin, upstream1)
+  p.strictEqual(pool2[kUrl].origin, upstream2)
+})
+
+test('getUpstream returns undefined for non-existent upstream', (t) => {
+  const p = tspl(t, { plan: 1 })
+
+  const pool = new BalancedPool()
+  pool.addUpstream('http://localhost:3001')
+
+  const result = pool.getUpstream('http://localhost:9999')
+  p.strictEqual(result, undefined)
+})
+
+test('getUpstream returns undefined for closed/destroyed upstream', (t) => {
+  const p = tspl(t, { plan: 2 })
+
+  const upstream = 'http://localhost:3001'
+  const pool = new BalancedPool()
+  pool.addUpstream(upstream)
+
+  const upstreamPool = pool.getUpstream(upstream)
+  p.ok(upstreamPool instanceof Pool)
+
+  upstreamPool.destroy()
+
+  const result = pool.getUpstream(upstream)
+  p.strictEqual(result, undefined)
+})
+
+function getErrorPort (err) {
+  if (err?.socket?.remotePort !== undefined) {
+    return err.socket.remotePort
+  }
+
+  if (err?.port !== undefined) {
+    return err.port
+  }
+
+  // The upstreams below are built on `localhost`, which resolves to both ::1 and
+  // 127.0.0.1, so a connection failure arrives as an AggregateError from the
+  // happy eyeballs attempt. The port is only on the individual causes.
+  if (Array.isArray(err?.errors)) {
+    for (const cause of err.errors) {
+      const port = getErrorPort(cause)
+      if (port !== undefined) {
+        return port
+      }
+    }
+  }
+
+  return undefined
+}
+
+test('getErrorPort resolves the port of an aggregated connection error', async (t) => {
+  const p = tspl(t, { plan: 2 })
+
+  // Nothing listens on port 1. Because the upstream is `localhost`, both ::1 and
+  // 127.0.0.1 are attempted and the refusals arrive wrapped in an AggregateError
+  // that carries no port of its own.
+  const pool = new BalancedPool('http://localhost:1')
+  t.after(() => pool.close())
+
+  try {
+    await pool.request({ path: '/', method: 'GET' })
+    p.fail('request should have been refused')
+  } catch (err) {
+    p.strictEqual(err.code, 'ECONNREFUSED')
+    p.strictEqual(getErrorPort(err), 1)
+  }
+
+  await p.completed
 })
 
 class TestServer {
@@ -298,7 +441,7 @@ class TestServer {
   }
 
   start () {
-    this.server = createServer((req, res) => {
+    this.server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
       if (this._shouldHangupOnClient()) {
         req.destroy(new Error('(ツ)'))
         return
@@ -501,19 +644,25 @@ describe('weighted round robin', () => {
 
         await Promise.all(servers.map(server => server.prepareForIteration(i)))
 
-        // send a request using undinci
+        // send a request using undici
         try {
           await client.request({ path: '/', method: 'GET' })
         } catch (e) {
-          const serverWithError =
-          servers.find(server => server.port === e.port) ||
-          servers.find(server => {
-            if (typeof AggregateError === 'function' && e instanceof AggregateError) {
-              return e.errors.some(e => server.port === (e.socket?.remotePort ?? e.port))
+          const serverWithError = servers.find(server => {
+            if (server.port === getErrorPort(e)) {
+              return true
             }
 
-            return server.port === e.socket.remotePort
+            if (typeof AggregateError === 'function' && e instanceof AggregateError) {
+              return e.errors.some(err => server.port === getErrorPort(err))
+            }
+
+            return false
           })
+
+          if (serverWithError === undefined) {
+            throw e
+          }
 
           serverWithError.requestsCount++
 
@@ -554,4 +703,40 @@ describe('weighted round robin', () => {
       await client.close()
     })
   }
+})
+
+test('should not be vulnerable to __proto__ pollution via options', async (t) => {
+  const { EventEmitter } = require('node:events')
+
+  let capturedOpts
+
+  // Simulate attacker-controlled options with __proto__ property
+  const attackerOptions = JSON.parse(`
+    {
+      "__proto__": {
+        "polluted": "YES",
+        "connections": 1
+      }
+    }
+  `)
+
+  attackerOptions.factory = (origin, opts) => {
+    capturedOpts = opts
+
+    const stub = new EventEmitter()
+    stub.dispatch = () => true
+    stub.close = () => Promise.resolve()
+    stub.destroy = () => Promise.resolve()
+    stub.destroyed = false
+    stub.closed = false
+
+    return stub
+  }
+
+  new BalancedPool(['http://localhost/'], attackerOptions) // eslint-disable-line no-new
+
+  // Verify that the captured options do not have polluted prototype
+  assert.strictEqual(capturedOpts.polluted, undefined, 'polluted property should not exist on options')
+  assert.strictEqual(Object.getPrototypeOf(capturedOpts).polluted, undefined, 'prototype should not be polluted')
+  assert.strictEqual({}.polluted, undefined, 'global Object.prototype should not be polluted')
 })

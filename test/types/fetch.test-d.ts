@@ -1,6 +1,6 @@
-import { URL } from 'url'
-import { Blob } from 'buffer'
-import { ReadableStream } from 'stream/web'
+import { URL } from 'node:url'
+import { Blob } from 'node:buffer'
+import { ReadableStream } from 'node:stream/web'
 import { expectType, expectError, expectAssignable, expectNotAssignable } from 'tsd'
 import {
   Agent,
@@ -38,17 +38,18 @@ declare const request: Request
 declare const headers: Headers
 declare const response: Response
 
-expectType<string | undefined>(requestInit.method)
-expectType<boolean | undefined>(requestInit.keepalive)
-expectType<HeadersInit | undefined>(requestInit.headers)
 expectType<BodyInit | undefined>(requestInit.body)
-expectType<RequestRedirect | undefined>(requestInit.redirect)
-expectType<string | undefined>(requestInit.integrity)
-expectType<AbortSignal | null | undefined>(requestInit.signal)
+expectType<RequestCache | undefined>(requestInit.cache)
 expectType<RequestCredentials | undefined>(requestInit.credentials)
+expectType<HeadersInit | undefined>(requestInit.headers)
+expectType<string | undefined>(requestInit.integrity)
+expectType<boolean | undefined>(requestInit.keepalive)
+expectType<string | undefined>(requestInit.method)
 expectType<RequestMode | undefined>(requestInit.mode)
+expectType<RequestRedirect | undefined>(requestInit.redirect)
 expectType<string | undefined>(requestInit.referrer)
 expectType<ReferrerPolicy | undefined>(requestInit.referrerPolicy)
+expectType<AbortSignal | null | undefined>(requestInit.signal)
 expectType<null | undefined>(requestInit.window)
 
 expectType<Dispatcher | undefined>(requestInit2.dispatcher)
@@ -173,8 +174,10 @@ expectType<boolean>(response.bodyUsed)
 expectType<Promise<ArrayBuffer>>(response.arrayBuffer())
 expectType<Promise<Blob>>(response.blob())
 expectType<Promise<FormData>>(response.formData())
+expectType<Promise<Uint8Array>>(response.bytes())
 expectType<Promise<unknown>>(response.json())
 expectType<Promise<string>>(response.text())
+expectType<ReadableStream<string>>(response.textStream())
 expectType<Response>(response.clone())
 
 expectType<Request>(new Request('https://example.com', { body: 'Hello, world', duplex: 'half' }))
@@ -184,3 +187,15 @@ expectNotAssignable<RequestInit>({ duplex: 'not valid' })
 expectType<string[]>(headers.getSetCookie())
 
 expectType<Request>(new Request('https://example.com', request))
+
+expectAssignable<Response>(new (class extends Response {
+  override clone () {
+    return this
+  }
+})())
+
+expectAssignable<Request>(new (class extends Request {
+  override clone () {
+    return this
+  }
+})('https://example.com'))

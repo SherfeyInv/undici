@@ -4,15 +4,54 @@ const { tspl } = require('@matteo.collina/tspl')
 const { test, after } = require('node:test')
 const { createServer } = require('node:http')
 const { once } = require('node:events')
+const { spawnSync } = require('node:child_process')
 
 const { Client, interceptors } = require('../..')
-const { retry } = interceptors
+const { retry, redirect, dns } = interceptors
+
+test('Should handle informational responses', async t => {
+  t = tspl(t, { plan: 4 })
+
+  const server = createServer({ joinDuplicateHeaders: true }, (_req, res) => {
+    res.writeEarlyHints({ link: '</style.css>; rel=preload; as=style' })
+    res.end('hello world!')
+  })
+  server.listen(0)
+
+  await once(server, 'listening')
+
+  const client = new Client(
+    `http://localhost:${server.address().port}`
+  ).compose(retry())
+
+  after(async () => {
+    await client.close()
+    server.close()
+
+    await once(server, 'close')
+  })
+
+  const infos = []
+  const response = await client.request({
+    method: 'GET',
+    path: '/',
+    onInfo: info => infos.push(info)
+  })
+
+  t.strictEqual(response.statusCode, 200)
+  t.strictEqual(await response.body.text(), 'hello world!')
+  t.strictEqual(infos.length, 1)
+  t.deepStrictEqual(infos[0], {
+    statusCode: 103,
+    headers: { link: '</style.css>; rel=preload; as=style' }
+  })
+})
 
 test('Should retry status code', async t => {
   t = tspl(t, { plan: 4 })
 
   let counter = 0
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   const retryOptions = {
     retry: (err, { state, opts }, done) => {
       counter++
@@ -74,11 +113,54 @@ test('Should retry status code', async t => {
   t.equal(await response.body.text(), 'hello world!')
 })
 
+test('Should retry on error code', async t => {
+  t = tspl(t, { plan: 2 })
+
+  let counter = 0
+  const retryOptions = {
+    retry: (err, _state, done) => {
+      if (counter < 5) {
+        counter++
+        setTimeout(done, 500)
+      } else {
+        done(err)
+      }
+    },
+    maxRetries: 5
+  }
+  const requestOptions = {
+    origin: 'http://localhost:123',
+    method: 'GET',
+    path: '/',
+    headers: {
+      'content-type': 'application/json'
+    }
+  }
+
+  const client = new Client(
+    'http://localhost:123'
+  ).compose(dns({
+    lookup: (_h, _o, cb) => {
+      const error = new Error('ENOTFOUND')
+      error.code = 'ENOTFOUND'
+
+      cb(error)
+    }
+  }), retry(retryOptions))
+
+  after(async () => {
+    await client.close()
+  })
+
+  await t.rejects(client.request(requestOptions), { code: 'ENOTFOUND' })
+  t.equal(counter, 5)
+})
+
 test('Should use retry-after header for retries', async t => {
   t = tspl(t, { plan: 3 })
 
   let counter = 0
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   let checkpoint
   const dispatchOptions = {
     method: 'PUT',
@@ -134,9 +216,9 @@ test('Should use retry-after header for retries (date)', async t => {
   t = tspl(t, { plan: 3 })
 
   let counter = 0
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   let checkpoint
-  const reuestOptions = {
+  const requestOptions = {
     method: 'PUT',
     path: '/',
     headers: {
@@ -147,19 +229,19 @@ test('Should use retry-after header for retries (date)', async t => {
   server.on('request', (req, res) => {
     switch (counter) {
       case 0:
+        checkpoint = Date.now()
         res.writeHead(429, {
           'retry-after': new Date(
-            new Date().setSeconds(new Date().getSeconds() + 1)
+            checkpoint + 2000
           ).toUTCString()
         })
         res.end('rate limit')
-        checkpoint = Date.now()
         counter++
         return
       case 1:
         res.writeHead(200)
         res.end('hello world!')
-        t.ok(Date.now() - checkpoint >= 1)
+        t.ok(Date.now() - checkpoint >= 1000)
         counter++
         return
       default:
@@ -182,7 +264,7 @@ test('Should use retry-after header for retries (date)', async t => {
     await once(server, 'close')
   })
 
-  const response = await client.request(reuestOptions)
+  const response = await client.request(requestOptions)
 
   t.equal(response.statusCode, 200)
   t.equal(await response.body.text(), 'hello world!')
@@ -192,7 +274,7 @@ test('Should retry with defaults', async t => {
   t = tspl(t, { plan: 2 })
 
   let counter = 0
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   const requestOptions = {
     method: 'GET',
     path: '/',
@@ -243,6 +325,41 @@ test('Should retry with defaults', async t => {
   t.equal(await response.body.text(), 'hello world!')
 })
 
+test('Should pass context from other interceptors', async t => {
+  t = tspl(t, { plan: 2 })
+
+  const server = createServer({ joinDuplicateHeaders: true })
+  const requestOptions = {
+    method: 'GET',
+    path: '/'
+  }
+
+  server.on('request', (req, res) => {
+    res.writeHead(200)
+    res.end('hello world!')
+  })
+
+  server.listen(0)
+
+  await once(server, 'listening')
+
+  const client = new Client(
+    `http://localhost:${server.address().port}`
+  ).compose(redirect({ maxRedirections: 1 }), retry())
+
+  after(async () => {
+    await client.close()
+    server.close()
+
+    await once(server, 'close')
+  })
+
+  const response = await client.request(requestOptions)
+
+  t.equal(response.statusCode, 200)
+  t.deepStrictEqual(response.context, { history: [new URL(requestOptions.path, `http://localhost:${server.address().port}`)] })
+})
+
 test('Should handle 206 partial content', async t => {
   t = tspl(t, { plan: 5 })
 
@@ -250,17 +367,18 @@ test('Should handle 206 partial content', async t => {
 
   // Took from: https://github.com/nxtedition/nxt-lib/blob/4b001ebc2f22cf735a398f35ff800dd553fe5933/test/undici/retry.js#L47
   let x = 0
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     if (x === 0) {
       t.ok(true, 'pass')
+      res.setHeader('content-length', '6')
       res.setHeader('etag', 'asd')
       res.write('abc')
       setTimeout(() => {
         res.destroy()
       }, 1e2)
     } else if (x === 1) {
-      t.deepStrictEqual(req.headers.range, 'bytes=3-')
-      res.setHeader('content-range', 'bytes 3-6/6')
+      t.deepStrictEqual(req.headers.range, 'bytes=3-5')
+      res.setHeader('content-range', 'bytes 3-5/6')
       res.setHeader('etag', 'asd')
       res.statusCode = 206
       res.end('def')
@@ -312,12 +430,118 @@ test('Should handle 206 partial content', async t => {
   t.strictEqual(counter, 1)
 })
 
-test('Should handle 206 partial content - bad-etag', async t => {
+test('Should reject initial 206 partial content with mismatched content-length', async t => {
   t = tspl(t, { plan: 3 })
+
+  let x = 0
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+    if (x === 0) {
+      t.strictEqual(req.headers.range, 'bytes=0-99')
+      res.statusCode = 206
+      res.setHeader('content-range', 'bytes 0-99/300')
+      res.setHeader('content-length', '300')
+      res.end('1'.repeat(99))
+      res.socket?.destroy()
+    } else if (x === 1) {
+      res.statusCode = 206
+      res.setHeader('content-range', 'bytes 99-99/300')
+      res.setHeader('content-length', '1')
+      res.end('1')
+    }
+    x++
+  })
+
+  server.listen(0)
+
+  await once(server, 'listening')
+
+  const client = new Client(
+    `http://localhost:${server.address().port}`
+  ).compose(retry())
+
+  after(async () => {
+    await client.close()
+    server.close()
+
+    await once(server, 'close')
+  })
+
+  await t.rejects(async () => {
+    const response = await client.request({
+      method: 'GET',
+      path: '/',
+      headers: {
+        range: 'bytes=0-99'
+      }
+    })
+    await response.body.text()
+  }, {
+    name: 'RequestRetryError',
+    code: 'UND_ERR_REQ_RETRY',
+    message: 'Content-Length mismatch'
+  })
+  t.strictEqual(x, 1)
+})
+
+test('Should forward a multipart/byteranges 206 without content-range', async t => {
+  t = tspl(t, { plan: 4 })
+
+  const body = [
+    '--THIS_STRING_SEPARATES',
+    'content-type: text/plain',
+    'content-range: bytes 0-3/25',
+    '',
+    'abcd',
+    '--THIS_STRING_SEPARATES',
+    'content-type: text/plain',
+    'content-range: bytes 10-14/25',
+    '',
+    'klmno',
+    '--THIS_STRING_SEPARATES--',
+    ''
+  ].join('\r\n')
+
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+    t.strictEqual(req.headers.range, 'bytes=0-3,10-14')
+    res.statusCode = 206
+    res.setHeader('content-type', 'multipart/byteranges; boundary=THIS_STRING_SEPARATES')
+    res.end(body)
+  })
+
+  server.listen(0)
+
+  await once(server, 'listening')
+
+  const client = new Client(
+    `http://localhost:${server.address().port}`
+  ).compose(retry({ maxRetries: 0 }))
+
+  after(async () => {
+    await client.close()
+    server.close()
+
+    await once(server, 'close')
+  })
+
+  const response = await client.request({
+    method: 'GET',
+    path: '/',
+    headers: {
+      range: 'bytes=0-3,10-14'
+    }
+  })
+
+  t.strictEqual(response.statusCode, 206)
+  t.strictEqual(response.headers['content-type'], 'multipart/byteranges; boundary=THIS_STRING_SEPARATES')
+  t.strictEqual(await response.body.text(), body)
+})
+
+test('Should handle 206 partial content - bad-etag', async t => {
+  t = tspl(t, { plan: 5 })
 
   // Took from: https://github.com/nxtedition/nxt-lib/blob/4b001ebc2f22cf735a398f35ff800dd553fe5933/test/undici/retry.js#L47
   let x = 0
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     if (x === 0) {
       t.ok(true, 'pass')
       res.setHeader('etag', 'asd')
@@ -327,7 +551,7 @@ test('Should handle 206 partial content - bad-etag', async t => {
       }, 1e2)
     } else if (x === 1) {
       t.deepStrictEqual(req.headers.range, 'bytes=3-')
-      res.setHeader('content-range', 'bytes 3-6/6')
+      res.setHeader('content-range', 'bytes 3-5/6')
       res.setHeader('etag', 'erwsd')
       res.statusCode = 206
       res.end('def')
@@ -372,18 +596,112 @@ test('Should handle 206 partial content - bad-etag', async t => {
     const response = await client.request(requestOptions)
     await response.body.text()
   } catch (error) {
-    t.strict(error, {
-      message: 'ETag mismatch',
-      code: 'UND_ERR_REQ_RETRY',
-      name: 'RequestRetryError'
-    })
+    t.strictEqual(error.name, 'RequestRetryError')
+    t.strictEqual(error.code, 'UND_ERR_REQ_RETRY')
+    t.strictEqual(error.message, 'ETag mismatch')
   }
+})
+
+test('#4970 - Should reject resumed partial content when body exceeds Content-Range', async t => {
+  t = tspl(t, { plan: 5 })
+
+  let x = 0
+  const injectedResponse = 'HTTP/1.1 302 Found\r\nLocation: http://evil.com\r\nContent-Length: 0\r\n\r\n'
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+    if (x === 0) {
+      t.ok(true, 'pass')
+      res.setHeader('content-length', '5')
+      res.setHeader('etag', '123')
+      res.write('use')
+      setTimeout(() => {
+        res.destroy()
+      }, 1e2)
+    } else if (x === 1) {
+      t.deepStrictEqual(req.headers.range, 'bytes=3-4')
+      t.deepStrictEqual(req.headers['if-match'], '123')
+      res.statusCode = 206
+      res.setHeader('etag', '123')
+      res.setHeader('content-range', 'bytes 3-4/5')
+      res.end(`r1${injectedResponse}`)
+    }
+    x++
+  })
+
+  const requestOptions = {
+    method: 'GET',
+    path: '/',
+    headers: {
+      'content-type': 'application/json'
+    },
+    retryOptions: {
+      retry: (err, { state, opts }, done) => {
+        if (err.message.includes('other side closed')) {
+          setTimeout(done, 100)
+          return
+        }
+
+        return done(err)
+      }
+    }
+  }
+
+  server.listen(0)
+
+  await once(server, 'listening')
+
+  const client = new Client(
+    `http://localhost:${server.address().port}`
+  ).compose(retry())
+
+  after(async () => {
+    await client.close()
+    server.close()
+
+    await once(server, 'close')
+  })
+
+  const response = await client.request(requestOptions)
+  t.strictEqual(response.statusCode, 200)
+  await t.rejects(response.body.text(), {
+    name: 'RequestRetryError',
+    code: 'UND_ERR_REQ_RETRY',
+    message: 'Content-Length mismatch'
+  })
+})
+
+test('Should not reject a HEAD response with content-length', async t => {
+  t = tspl(t, { plan: 3 })
+
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+    res.setHeader('content-length', '1234')
+    res.end()
+  })
+
+  server.listen(0)
+
+  await once(server, 'listening')
+
+  const client = new Client(
+    `http://localhost:${server.address().port}`
+  ).compose(retry())
+
+  after(async () => {
+    await client.close()
+    server.close()
+
+    await once(server, 'close')
+  })
+
+  const response = await client.request({ method: 'HEAD', path: '/' })
+  t.strictEqual(response.statusCode, 200)
+  t.strictEqual(response.headers['content-length'], '1234')
+  t.strictEqual(await response.body.text(), '')
 })
 
 test('retrying a request with a body', async t => {
   t = tspl(t, { plan: 2 })
   let counter = 0
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   const requestOptions = {
     method: 'POST',
     path: '/',
@@ -448,7 +766,7 @@ test('retrying a request with a body', async t => {
 test('should not error if request is not meant to be retried', async t => {
   t = tspl(t, { plan: 2 })
 
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   server.on('request', (req, res) => {
     res.writeHead(400)
     res.end('Bad request')
@@ -479,4 +797,16 @@ test('should not error if request is not meant to be retried', async t => {
 
   t.equal(response.statusCode, 400)
   t.equal(await response.body.text(), 'Bad request')
+})
+
+test('#3975 - keep event loop ticking', async t => {
+  const suite = tspl(t, { plan: 2 })
+
+  const res = spawnSync('node', ['./test/fixtures/interceptors/retry-event-loop.js'], {
+    stdio: 'pipe'
+  })
+
+  const output = res.stderr.toString()
+  suite.ok(output.includes('UND_ERR_REQ_RETRY'))
+  suite.ok(output.includes('RequestRetryError: Request failed'))
 })

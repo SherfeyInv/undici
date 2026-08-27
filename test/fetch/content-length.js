@@ -1,19 +1,17 @@
 'use strict'
 
 const { test } = require('node:test')
-const assert = require('node:assert')
 const { createServer } = require('node:http')
 const { once } = require('node:events')
-const { Blob } = require('node:buffer')
 const { fetch, FormData } = require('../..')
 const { closeServerAsPromise } = require('../utils/node-http')
 
 // https://github.com/nodejs/undici/issues/1783
 test('Content-Length is set when using a FormData body with fetch', async (t) => {
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     // TODO: check the length's value once the boundary has a fixed length
-    assert.ok('content-length' in req.headers) // request has content-length header
-    assert.ok(!Number.isNaN(Number(req.headers['content-length'])))
+    t.assert.ok('content-length' in req.headers) // request has content-length header
+    t.assert.ok(!Number.isNaN(Number(req.headers['content-length'])))
     res.end()
   }).listen(0)
 
@@ -27,5 +25,25 @@ test('Content-Length is set when using a FormData body with fetch', async (t) =>
   await fetch(`http://localhost:${server.address().port}`, {
     method: 'POST',
     body: fd
+  })
+})
+
+test('Content-Length is not duplicated when provided explicitly', async (t) => {
+  const body = 'a+b+c'
+
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
+    t.assert.strictEqual(req.headers['content-length'], `${Buffer.byteLength(body)}`)
+    res.end()
+  }).listen(0)
+
+  await once(server, 'listening')
+  t.after(closeServerAsPromise(server))
+
+  await fetch(`http://localhost:${server.address().port}`, {
+    method: 'POST',
+    body,
+    headers: {
+      'content-length': Buffer.byteLength(body)
+    }
   })
 })

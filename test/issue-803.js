@@ -10,8 +10,10 @@ test('https://github.com/nodejs/undici/issues/803', { timeout: 60000 }, async (t
   t = tspl(t, { plan: 2 })
   const SIZE = 5900373096
 
-  const server = createServer(async (req, res) => {
-    const chunkSize = res.writableHighWaterMark << 5
+  const server = createServer({ joinDuplicateHeaders: true }, async (req, res) => {
+    // Use large writes so this >32-bit Content-Length regression test does
+    // not monopolize loopback I/O when the unit suite runs concurrently.
+    const chunkSize = 16 * 1024 * 1024
     const parts = (SIZE / chunkSize) | 0
     const lastPartSize = SIZE % chunkSize
     const chunk = Buffer.allocUnsafe(chunkSize)
@@ -38,6 +40,12 @@ test('https://github.com/nodejs/undici/issues/803', { timeout: 60000 }, async (t
   await once(server, 'listening')
   const client = new Client(`http://localhost:${server.address().port}`)
   after(() => client.close())
+
+  client.on('disconnect', () => {
+    if (!client.closed && !client.destroyed) {
+      t.fail('unexpected disconnect')
+    }
+  })
 
   client.request({
     path: '/',

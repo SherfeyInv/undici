@@ -1,3 +1,5 @@
+'use strict'
+
 const http = require('node:http')
 const zlib = require('node:zlib')
 const { once } = require('node:events')
@@ -5,7 +7,7 @@ const Busboy = require('@fastify/busboy')
 
 module.exports = class TestServer {
   constructor () {
-    this.server = http.createServer(this.router)
+    this.server = http.createServer({ joinDuplicateHeaders: true }, this.router)
     // Node 8 default keepalive timeout is 5000ms
     // make it shorter here as we want to close server quickly at the end of tests
     this.server.keepAliveTimeout = 1000
@@ -23,6 +25,9 @@ module.exports = class TestServer {
   }
 
   async stop () {
+    // Destroy all active connections before closing
+    // This prevents 'close' from hanging on platforms like Windows
+    this.server.closeAllConnections()
     this.server.close()
     return once(this.server, 'close')
   }
