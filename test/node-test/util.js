@@ -20,6 +20,35 @@ test('isStream', () => {
   assert.ok(util.isStream(ee) === false)
 })
 
+test('addAbortListener supports AbortSignal', async () => {
+  const ac = new AbortController()
+  let calls = 0
+
+  util.addAbortListener(ac.signal, () => {
+    calls++
+  })
+
+  ac.abort()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(calls, 1)
+})
+
+test('addAbortListener removes native AbortSignal listener', async () => {
+  const ac = new AbortController()
+  let calls = 0
+
+  const remove = util.addAbortListener(ac.signal, () => {
+    calls++
+  })
+
+  remove()
+  ac.abort()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(calls, 0)
+})
+
 test('getServerName', () => {
   assert.equal(util.getServerName('1.1.1.1'), '')
   assert.equal(util.getServerName('1.1.1.1:443'), '')
@@ -29,53 +58,61 @@ test('getServerName', () => {
   assert.equal(util.getServerName('[2606:4700:4700::1111]:443'), '')
 })
 
-test('validateHandler', () => {
-  assert.throws(() => util.validateHandler(null), InvalidArgumentError, 'handler must be an object')
-  assert.throws(() => util.validateHandler({
-    onConnect: null
-  }), InvalidArgumentError, 'invalid onConnect method')
-  assert.throws(() => util.validateHandler({
-    onConnect: () => {},
-    onError: null
-  }), InvalidArgumentError, 'invalid onError method')
-  assert.throws(() => util.validateHandler({
-    onConnect: () => {},
-    onError: () => {},
+test('assertRequestHandler', () => {
+  assert.throws(() => util.assertRequestHandler(null), InvalidArgumentError, 'handler must be an object')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: null
+  }), InvalidArgumentError, 'invalid onRequestStart method')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: null
+  }), InvalidArgumentError, 'invalid onResponseError method')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: () => {},
     onBodySent: null
   }), InvalidArgumentError, 'invalid onBodySent method')
-  assert.throws(() => util.validateHandler({
-    onConnect: () => {},
-    onError: () => {},
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: () => {},
+    onRequestSent: null
+  }), InvalidArgumentError, 'invalid onRequestSent method')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: () => {},
     onBodySent: () => {},
-    onHeaders: null
-  }), InvalidArgumentError, 'invalid onHeaders method')
-  assert.throws(() => util.validateHandler({
-    onConnect: () => {},
-    onError: () => {},
+    onRequestSent: () => {},
+    onResponseStart: null
+  }), InvalidArgumentError, 'invalid onResponseStart method')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: () => {},
     onBodySent: () => {},
-    onHeaders: () => {},
-    onData: null
-  }), InvalidArgumentError, 'invalid onData method')
-  assert.throws(() => util.validateHandler({
-    onConnect: () => {},
-    onError: () => {},
+    onRequestSent: () => {},
+    onResponseStart: () => {},
+    onResponseData: null
+  }), InvalidArgumentError, 'invalid onResponseData method')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: () => {},
     onBodySent: () => {},
-    onHeaders: () => {},
-    onData: () => {},
-    onComplete: null
-  }), InvalidArgumentError, 'invalid onComplete method')
-  assert.throws(() => util.validateHandler({
-    onConnect: () => {},
-    onError: () => {},
+    onRequestSent: () => {},
+    onResponseStart: () => {},
+    onResponseData: () => {},
+    onResponseEnd: null
+  }), InvalidArgumentError, 'invalid onResponseEnd method')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: () => {},
     onBodySent: () => {},
-    onUpgrade: 'null'
-  }, 'CONNECT'), InvalidArgumentError, 'invalid onUpgrade method')
-  assert.throws(() => util.validateHandler({
-    onConnect: () => {},
-    onError: () => {},
+    onRequestUpgrade: 'null'
+  }, 'CONNECT'), InvalidArgumentError, 'invalid onRequestUpgrade method')
+  assert.throws(() => util.assertRequestHandler({
+    onRequestStart: () => {},
+    onResponseError: () => {},
     onBodySent: () => {},
-    onUpgrade: 'null'
-  }, 'CONNECT', () => {}), InvalidArgumentError, 'invalid onUpgrade method')
+    onRequestUpgrade: 'null'
+  }, 'CONNECT', () => {}), InvalidArgumentError, 'invalid onRequestUpgrade method')
 })
 
 test('parseHeaders', () => {
@@ -87,12 +124,63 @@ test('parseHeaders', () => {
   assert.deepEqual(util.parseHeaders([Buffer.from('key'), [Buffer.from('value1'), Buffer.from('value2'), Buffer.from('value3')]]), { key: ['value1', 'value2', 'value3'] })
 })
 
-test('parseRawHeaders', () => {
-  assert.deepEqual(util.parseRawHeaders(['key', 'value', Buffer.from('key'), Buffer.from('value')]), ['key', 'value', 'key', 'value'])
-  assert.deepEqual(util.parseRawHeaders(['content-length', 'value', 'content-disposition', 'form-data; name="fieldName"']), ['content-length', 'value', 'content-disposition', 'form-data; name="fieldName"'])
+test('parseHeaders decodes values as latin1, not utf8', () => {
+  // These bytes (0xE2, 0x80, 0xA6) are the UTF-8 encoding of U+2026 (ellipsis)
+  // When decoded as latin1, they should be 3 separate characters: â, €, ¦
+  // When incorrectly decoded as UTF-8, they would be a single character: …
+  const latin1Bytes = Buffer.from([0xe2, 0x80, 0xa6])
+  const result = util.parseHeaders([Buffer.from('x-test'), latin1Bytes])
+
+  assert.strictEqual(result['x-test'].length, 3)
+  assert.strictEqual(result['x-test'].charCodeAt(0), 0xe2)
+  assert.strictEqual(result['x-test'].charCodeAt(1), 0x80)
+  assert.strictEqual(result['x-test'].charCodeAt(2), 0xa6)
 })
 
-test('buildURL', () => {
+test('parseHeaders decodes duplicate header values as latin1', () => {
+  const latin1Bytes = Buffer.from([0xe2, 0x80, 0xa6])
+  const result = util.parseHeaders([
+    Buffer.from('x-test'), Buffer.from('first'),
+    Buffer.from('x-test'), latin1Bytes
+  ])
+
+  assert.deepEqual(result['x-test'][0], 'first')
+  assert.strictEqual(result['x-test'][1].length, 3)
+  assert.strictEqual(result['x-test'][1].charCodeAt(0), 0xe2)
+})
+
+test('parseHeaders decodes array header values as latin1', () => {
+  const latin1Bytes = Buffer.from([0xe2, 0x80, 0xa6])
+  const result = util.parseHeaders([Buffer.from('x-test'), [latin1Bytes, latin1Bytes]])
+
+  assert.strictEqual(result['x-test'].length, 2)
+  assert.strictEqual(result['x-test'][0].length, 3)
+  assert.strictEqual(result['x-test'][0].charCodeAt(0), 0xe2)
+})
+
+test('parseRawHeaders', () => {
+  assert.deepEqual(util.parseRawHeaders(), [])
+  assert.deepEqual(util.parseRawHeaders(null), [])
+  assert.deepEqual(util.parseRawHeaders(['key', 'value', Buffer.from('key'), Buffer.from('value')]), ['key', 'value', 'key', 'value'])
+  assert.deepEqual(util.parseRawHeaders(['content-length', 'value', 'content-disposition', 'form-data; name="fieldName"']), ['content-length', 'value', 'content-disposition', 'form-data; name="fieldName"'])
+  assert.deepEqual(util.parseRawHeaders({ key: 'value', 'set-cookie': ['a=1', 'b=2'] }), ['key', 'value', 'set-cookie', 'a=1', 'set-cookie', 'b=2'])
+})
+
+test('parseRawHeaders decodes values as latin1, not utf8', () => {
+  // These bytes (0xE2, 0x80, 0xA6) are the UTF-8 encoding of U+2026 (ellipsis)
+  // When decoded as latin1, they should be 3 separate characters
+  // When incorrectly decoded as UTF-8, they would be a single character
+  const latin1Bytes = Buffer.from([0xe2, 0x80, 0xa6])
+  const result = util.parseRawHeaders([Buffer.from('x-test'), latin1Bytes])
+
+  assert.strictEqual(result[0], 'x-test')
+  assert.strictEqual(result[1].length, 3)
+  assert.strictEqual(result[1].charCodeAt(0), 0xe2)
+  assert.strictEqual(result[1].charCodeAt(1), 0x80)
+  assert.strictEqual(result[1].charCodeAt(2), 0xa6)
+})
+
+test('serializePathWithQuery', () => {
   const tests = [
     [{ id: BigInt(123456) }, 'id=123456'],
     [{ date: new Date() }, 'date='],
@@ -111,7 +199,7 @@ test('buildURL', () => {
 
   for (const [input, output] of tests) {
     const expected = `${base}${output ? `?${output}` : output}`
-    assert.deepEqual(util.buildURL(base, input), expected)
+    assert.deepEqual(util.serializePathWithQuery(base, input), expected)
   }
 })
 

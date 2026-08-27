@@ -3,7 +3,6 @@
 const { strictEqual, throws, doesNotThrow } = require('node:assert')
 const { test, describe } = require('node:test')
 const { isBlobLike, parseURL, isHttpOrHttpsPrefixed, isValidPort } = require('../lib/core/util')
-const { Blob, File } = require('node:buffer')
 const { InvalidArgumentError } = require('../lib/core/errors')
 
 describe('isBlobLike', () => {
@@ -12,14 +11,14 @@ describe('isBlobLike', () => {
     strictEqual(isBlobLike(buffer), false)
   })
 
-  test('blob', { skip: !Blob }, () => {
+  test('blob', () => {
     const blob = new Blob(['asd'], {
       type: 'application/json'
     })
     strictEqual(isBlobLike(blob), true)
   })
 
-  test('file', { skip: !File }, () => {
+  test('file', () => {
     const file = new File(['asd'], 'file.txt', {
       type: 'text/plain'
     })
@@ -31,7 +30,7 @@ describe('isBlobLike', () => {
       [Symbol.toStringTag]: 'Blob',
       stream: () => { }
     }
-    strictEqual(isBlobLike(blobLikeStream), true)
+    strictEqual(isBlobLike(blobLikeStream), false)
   })
 
   test('fileLikeStream', () => {
@@ -39,7 +38,7 @@ describe('isBlobLike', () => {
       stream: () => { },
       [Symbol.toStringTag]: 'File'
     }
-    strictEqual(isBlobLike(fileLikeStream), true)
+    strictEqual(isBlobLike(fileLikeStream), false)
   })
 
   test('fileLikeArrayBuffer', () => {
@@ -47,7 +46,7 @@ describe('isBlobLike', () => {
       [Symbol.toStringTag]: 'Blob',
       arrayBuffer: () => { }
     }
-    strictEqual(isBlobLike(blobLikeArrayBuffer), true)
+    strictEqual(isBlobLike(blobLikeArrayBuffer), false)
   })
 
   test('blobLikeArrayBuffer', () => {
@@ -55,7 +54,7 @@ describe('isBlobLike', () => {
       [Symbol.toStringTag]: 'File',
       arrayBuffer: () => { }
     }
-    strictEqual(isBlobLike(fileLikeArrayBuffer), true)
+    strictEqual(isBlobLike(fileLikeArrayBuffer), false)
   })
 
   test('string', () => {

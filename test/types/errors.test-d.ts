@@ -27,14 +27,13 @@ expectAssignable<errors.BodyTimeoutError>(new errors.BodyTimeoutError())
 expectAssignable<'BodyTimeoutError'>(new errors.BodyTimeoutError().name)
 expectAssignable<'UND_ERR_BODY_TIMEOUT'>(new errors.BodyTimeoutError().code)
 
-expectAssignable<errors.UndiciError>(new errors.ResponseStatusCodeError())
-expectAssignable<errors.ResponseStatusCodeError>(new errors.ResponseStatusCodeError())
-expectAssignable<'ResponseStatusCodeError'>(new errors.ResponseStatusCodeError().name)
-expectAssignable<'UND_ERR_RESPONSE_STATUS_CODE'>(new errors.ResponseStatusCodeError().code)
-expectAssignable<number>(new errors.ResponseStatusCodeError().status)
-expectAssignable<number>(new errors.ResponseStatusCodeError().statusCode)
-expectAssignable<IncomingHttpHeaders | string[] | null>(new errors.ResponseStatusCodeError().headers)
-expectAssignable<null | Record<string, any> | string>(new errors.ResponseStatusCodeError().body)
+expectAssignable<errors.UndiciError>(new errors.ResponseError('', 0, {}))
+expectAssignable<errors.ResponseError>(new errors.ResponseError('', 0, {}))
+expectAssignable<'ResponseError'>(new errors.ResponseError('', 0, {}).name)
+expectAssignable<'UND_ERR_RESPONSE'>(new errors.ResponseError('', 0, {}).code)
+expectAssignable<number>(new errors.ResponseError('', 0, {}).statusCode)
+expectAssignable<IncomingHttpHeaders | string[] | null>(new errors.ResponseError('', 0, {}).headers)
+expectAssignable<null | Record<string, any> | string>(new errors.ResponseError('', 0, {}).body)
 
 expectAssignable<errors.UndiciError>(new errors.InvalidArgumentError())
 expectAssignable<errors.InvalidArgumentError>(new errors.InvalidArgumentError())
@@ -110,6 +109,16 @@ expectAssignable<errors.UndiciError>(new errors.SecureProxyConnectionError())
 expectAssignable<errors.SecureProxyConnectionError>(new errors.SecureProxyConnectionError())
 expectAssignable<'SecureProxyConnectionError'>(new errors.SecureProxyConnectionError().name)
 expectAssignable<'UND_ERR_PRX_TLS'>(new errors.SecureProxyConnectionError().code)
+
+expectAssignable<errors.UndiciError>(new errors.ProxyConnectionError())
+expectAssignable<errors.ProxyConnectionError>(new errors.ProxyConnectionError())
+expectAssignable<'ProxyConnectionError'>(new errors.ProxyConnectionError().name)
+expectAssignable<'UND_ERR_PRX_CONN'>(new errors.ProxyConnectionError().code)
+
+expectAssignable<errors.UndiciError>(new errors.MaxOriginsReachedError())
+expectAssignable<errors.MaxOriginsReachedError>(new errors.MaxOriginsReachedError())
+expectAssignable<'MaxOriginsReachedError'>(new errors.MaxOriginsReachedError().name)
+expectAssignable<'UND_ERR_MAX_ORIGINS_REACHED'>(new errors.MaxOriginsReachedError().code)
 
 {
   // @ts-ignore

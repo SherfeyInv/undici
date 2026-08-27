@@ -16,7 +16,7 @@ test('20 times GET with pipelining 10', async (t) => {
 
   let count = 0
   let countGreaterThanOne = false
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     count++
     setTimeout(function () {
       countGreaterThanOne = countGreaterThanOne || count > 1
@@ -27,7 +27,7 @@ test('20 times GET with pipelining 10', async (t) => {
 
   // needed to check for a warning on the maxListeners on the socket
   function onWarning (warning) {
-    if (!/ExperimentalWarning/.test(warning)) {
+    if (warning.name === 'MaxListenersExceededWarning') {
       t.fail()
     }
   }
@@ -41,6 +41,11 @@ test('20 times GET with pipelining 10', async (t) => {
       pipelining: 10
     })
     after(() => client.close())
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
 
     for (let i = 0; i < num; i++) {
       makeRequest(i)
@@ -61,7 +66,7 @@ test('20 times GET with pipelining 10', async (t) => {
 })
 
 function makeRequestAndExpectUrl (client, i, t, cb) {
-  return client.request({ path: '/' + i, method: 'GET' }, (err, { statusCode, headers, body }) => {
+  return client.request({ path: '/' + i, method: 'GET', blocking: false }, (err, { statusCode, headers, body }) => {
     cb()
     t.ifError(err)
     t.strictEqual(statusCode, 200)
@@ -83,7 +88,7 @@ test('A client should enqueue as much as twice its pipelining factor', async (t)
 
   let count = 0
   let countGreaterThanOne = false
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     count++
     t.ok(count <= 5)
     setTimeout(function () {
@@ -98,6 +103,11 @@ test('A client should enqueue as much as twice its pipelining factor', async (t)
       pipelining: 2
     })
     after(() => client.close())
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
 
     for (; sent < 2;) {
       t.ok(client[kSize] <= client.pipelining, 'client is not full')
@@ -137,7 +147,7 @@ test('pipeline 1 is 1 active request', async (t) => {
   t = tspl(t, { plan: 9 })
 
   let res2
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     res.write('asd')
     res2 = res
   })
@@ -148,6 +158,11 @@ test('pipeline 1 is 1 active request', async (t) => {
       pipelining: 1
     })
     after(() => client.destroy())
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
     client.request({
       path: '/',
       method: 'GET'
@@ -185,7 +200,7 @@ test('pipelined chunked POST stream', async (t) => {
   let a = 0
   let b = 0
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     req.on('data', chunk => {
       // Make sure a and b don't interleave.
       t.ok(a === 9 || b === 0)
@@ -201,6 +216,11 @@ test('pipelined chunked POST stream', async (t) => {
       pipelining: 2
     })
     after(() => client.close())
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
 
     client.request({
       path: '/',
@@ -254,7 +274,7 @@ test('pipelined chunked POST iterator', async (t) => {
   let a = 0
   let b = 0
 
-  const server = createServer((req, res) => {
+  const server = createServer({ joinDuplicateHeaders: true }, (req, res) => {
     req.on('data', chunk => {
       // Make sure a and b don't interleave.
       t.ok(a === 9 || b === 0)
@@ -270,6 +290,11 @@ test('pipelined chunked POST iterator', async (t) => {
       pipelining: 2
     })
     after(() => client.close())
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
 
     client.request({
       path: '/',
@@ -322,7 +347,7 @@ function errordInflightPost (bodyType) {
     t = tspl(t, { plan: 6 })
 
     let serverRes
-    const server = createServer()
+    const server = createServer({ joinDuplicateHeaders: true })
     server.on('request', (req, res) => {
       serverRes = res
       res.write('asd')
@@ -380,7 +405,7 @@ errordInflightPost(consts.ASYNC_ITERATOR)
 test('pipelining non-idempotent', async (t) => {
   t = tspl(t, { plan: 4 })
 
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   server.on('request', (req, res) => {
     setTimeout(() => {
       res.end('asd')
@@ -393,6 +418,11 @@ test('pipelining non-idempotent', async (t) => {
       pipelining: 2
     })
     after(() => client.close())
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
 
     let ended = false
     client.request({
@@ -426,7 +456,7 @@ function pipeliningNonIdempotentWithBody (bodyType) {
   test(`pipelining non-idempotent w body ${bodyType}`, async (t) => {
     t = tspl(t, { plan: 4 })
 
-    const server = createServer()
+    const server = createServer({ joinDuplicateHeaders: true })
     server.on('request', (req, res) => {
       setImmediate(() => {
         res.end('asd')
@@ -439,6 +469,11 @@ function pipeliningNonIdempotentWithBody (bodyType) {
         pipelining: 2
       })
       after(() => client.close())
+      client.on('disconnect', () => {
+        if (!client.closed && !client.destroyed) {
+          t.fail('unexpected disconnect')
+        }
+      })
 
       let ended = false
       let reading = false
@@ -489,7 +524,7 @@ function pipeliningHeadBusy (bodyType) {
   test(`pipelining HEAD busy ${bodyType}`, async (t) => {
     t = tspl(t, { plan: 7 })
 
-    const server = createServer()
+    const server = createServer({ joinDuplicateHeaders: true })
     server.on('request', (req, res) => {
       res.end('asd')
     })
@@ -561,7 +596,7 @@ test('pipelining empty pipeline before reset', async (t) => {
   t = tspl(t, { plan: 8 })
 
   let c = 0
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
   server.on('request', (req, res) => {
     if (c++ === 0) {
       res.end('asd')
@@ -587,7 +622,8 @@ test('pipelining empty pipeline before reset', async (t) => {
 
       client.request({
         path: '/',
-        method: 'GET'
+        method: 'GET',
+        blocking: false
       }, (err, data) => {
         t.ifError(err)
         data.body
@@ -623,7 +659,7 @@ function pipeliningIdempotentBusy (bodyType) {
   test(`pipelining idempotent busy ${bodyType}`, async (t) => {
     t = tspl(t, { plan: 12 })
 
-    const server = createServer()
+    const server = createServer({ joinDuplicateHeaders: true })
     server.on('request', (req, res) => {
       res.end('asd')
     })
@@ -727,7 +763,7 @@ pipeliningIdempotentBusy(consts.ASYNC_ITERATOR)
 test('pipelining blocked', async (t) => {
   t = tspl(t, { plan: 6 })
 
-  const server = createServer()
+  const server = createServer({ joinDuplicateHeaders: true })
 
   let blocking = true
   let count = 0
@@ -746,6 +782,11 @@ test('pipelining blocked', async (t) => {
       pipelining: 10
     })
     after(() => client.close())
+    client.on('disconnect', () => {
+      if (!client.closed && !client.destroyed) {
+        t.fail('unexpected disconnect')
+      }
+    })
     client.request({
       path: '/',
       method: 'GET',
